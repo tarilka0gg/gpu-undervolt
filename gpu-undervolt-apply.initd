@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Applies the tuned NVIDIA core/memory clock offset via a throwaway headless
+# Xorg (Coolbits). Runs in the boot runlevel, before any getty/login session
+# starts niri, so the VT switch happens before anything is on screen.
+
+description="Apply NVIDIA GPU undervolt offset via headless Xorg"
+
+depend() {
+	need modules
+	after modules
+	before display-manager
+}
+
+start() {
+	ebegin "Applying GPU undervolt offset"
+	/home/tarilka0gg/.local/bin/gpu-undervolt-apply
+	eend $?
+}

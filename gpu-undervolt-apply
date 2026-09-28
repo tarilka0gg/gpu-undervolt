@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Applies the tuned NVIDIA core/memory offset directly via nvidia-settings
+# (Coolbits), using a throwaway headless Xorg on a free VT. No clock lock -
+# the GPU boosts freely, just with a raised V/F curve.
+#
+# Uses -displayfd so Xorg picks a free display and reports readiness by
+# writing its number to a pipe - no sleep/poll loop needed.
+set -euo pipefail
+
+CORE_OFFSET=125
+MEM_OFFSET=250
+
+VT="vt7"
+XCONF="/etc/X11/xorg.conf.d/20-nvidia.conf"
+XLOG="/tmp/xorg-undervolt-apply.log"
+
+[[ $EUID -ne 0 ]] && { echo "Run as root (sudo)." >&2; exit 1; }
+
+echo "[*] Enabling persistence mode"
+nvidia-smi -pm 1 >/dev/null
+
+ORIG_VT="$(fgconsole 2>/dev/null || echo 1)"
+XORG_PID=""
+
+cleanup() {
+    local ec=$?
+    if [[ -n "$XORG_PID" ]] && kill -0 "$XORG_PID" 2>/dev/null; then
+        kill "$XORG_PID" 2>/dev/null || true
+        wait "$XORG_PID" 2>/dev/null || true
+    fi
+    chvt "$ORIG_VT" 2>/dev/null || true
+    exit "$ec"
+}
+trap cleanup EXIT INT TERM
+
+echo "[*] Starting headless Xorg on $VT..."
+coproc XORGCO { exec Xorg -displayfd 1 "$VT" -config "$XCONF" -logfile "$XLOG" -ac 2>/dev/null; }
+XORG_PID="$XORGCO_PID"
+
+if ! read -r -u "${XORGCO[0]}" DNUM; then
+    echo "[!] Xorg failed to start (often means the GPU has too little free VRAM" >&2
+    echo "    right now, e.g. a game is running heavy). Check $XLOG." >&2
+    exit 1
+fi
+DISP=":${DNUM}"
+echo "[*] Xorg ready on $DISP"
+
+echo "[*] Applying core offset: +${CORE_OFFSET} MHz"
+DISPLAY="$DISP" nvidia-settings -a "[gpu:0]/GPUGraphicsClockOffsetAllPerformanceLevels=${CORE_OFFSET}"
+echo "[*] Applying memory offset: +${MEM_OFFSET} MHz"
+DISPLAY="$DISP" nvidia-settings -a "[gpu:0]/GPUMemoryTransferRateOffsetAllPerformanceLevels=${MEM_OFFSET}"
+echo "[*] Setting PowerMizerMode to prefer maximum performance"
+DISPLAY="$DISP" nvidia-settings -a "[gpu:0]/GPUPowerMizerMode=1"
+
+echo "[*] Done, tearing down headless Xorg..."
+# cleanup trap kills Xorg and restores the original VT
